@@ -2,9 +2,10 @@
 section SamsaraPQExtension;
 
 [DataSource.Kind="SamsaraPQExtension", Publish="SamsaraPQExtension.Publish"]
-shared SamsaraPQExtension.Contents = () =>
+shared SamsaraPQExtension.Contents = (optional referenceDate as text) =>
     let
-        source = NavigationTable
+        referenceDate = if (referenceDate = null) then Date.AddDays(DateTime.Date(DateTime.LocalNow()),-1) else Date.FromText(referenceDate),
+        source = NavigationTable(referenceDate)
     in
         source
 ;
@@ -15,35 +16,42 @@ Purpose:
 */
 
 // shared NavigationTable = () =>
-NavigationTable = 
+NavigationTable = (referenceDate as date) =>
     let
         objects = #table(
             {"Name","Key","Data","ItemKind", "ItemName","IsLeaf"},
             {
 				{"Drivers","drivers", Drivers, "Table", "Table", true},
-                {"Vehicles","vehicles", Vehicles, "Table", "Table", true}
+                {"Vehicles","vehicles", Vehicles, "Table", "Table", true},
+				{"Dates","dates", Dates(referenceDate), "Table", "Table", true}
 //                 {"Users", "users", Users(subdomain), "Table", "Table", true},
 //                 {"Tables", "tables",  TableNodes(subdomain), "Folder", "Folder", false},
 //                 {"Metadata", "metadata",  MetadataNodes(subdomain), "Folder", "Folder", false}
-//                 {"Credentials","credentials", Credentials, "Table", "Table", true}
             }),
         NavTable = Table.ToNavigationTable(objects, {"Key"}, "Name", "Data", "ItemKind", "ItemName", "IsLeaf")
     in
         NavTable
 ;
 
-Credentials =
+/*
+*/
+
+Dates = (referenceDate as date) =>
 	let
-		accessToken = Extension.CurrentCredential()[Key],
-		Source = #table({"AccessToken"}, {{accessToken}})
+		Source = { Number.From(referenceDate)..Number.From( Date.AddDays(DateTime.Date(DateTime.LocalNow()),-1) ) },
+		#"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+		#"Changed Type" = Table.TransformColumnTypes(#"Converted to Table",{{"Column1", type datetime}}),
+		#"Renamed Columns" = Table.RenameColumns(#"Changed Type",{{"Column1", "StartOfDay"}}),
+		#"Inserted EndOfDay" = Table.AddColumn(#"Renamed Columns", "EndOfDay", each Date.EndOfDay([StartOfDay]), type datetime)
 	in
-		Source
-;
+		#"Inserted EndOfDay"
+	;
 
 /*
 Purpose:
     Retrieve table of Drivers
-Links:
+Link:
+	https://developers.samsara.com/reference/overview#operation/listDrivers
 */
 
 Drivers = 
@@ -63,7 +71,8 @@ Drivers =
 /*
 Purpose:
     Retrieve table of Vehicles
-Links:
+Link:
+	https://developers.samsara.com/reference/listvehicles
 */
 
 Vehicles = 
@@ -79,6 +88,62 @@ Vehicles =
         #"Expanded Column1"
 ;
 
+/*
+Parameters:
+	localDateTime - a date/time value assumed to be at the local timezone
+Returns:
+	# of seconds since 1970/01/01 00:00:00 @ UTC
+*/
+
+DateTimeToTimeStamp = (localDateTime as datetime) =>
+    let
+		Local = DateTimeZone.From(localDateTime),
+		UTC = DateTimeZone.ToUtc(Local),
+        timestamp = Duration.TotalSeconds(UTC - #datetimezone(1970, 1, 1, 0, 0, 0, 0, 0)) * 1000
+    in
+        timestamp
+;
+
+/*
+Parameters:
+	timestamp - # of seconds since 1970/01/01 00:00:00 @ UTC
+Returns:
+	a date/time value at the local timezone
+*/
+
+TimeStampToDateTime = (timestamp as number) =>
+    let
+        dateTime = DateTimeZone.ToLocal(#datetimezone(1970, 1, 1, 0, 0, 0, 0, 0) + #duration(0,0,0,timestamp/1000))
+    in
+        dateTime
+;
+
+/*
+Purpose:
+	Return the driver's safety score within the date range
+Parameters:
+	driverId - 
+	from - start of date range @ local
+	to - end of date range @ local
+*/
+
+GetSafetyScores = (driverId as number, from as datetime, to as datetime) as table =>
+
+	let
+		accessToken = Extension.CurrentCredential()[Key],
+		baseUrl = "https://api.samsara.com/",
+		endpointUrl = "/v1/fleet/drivers/" & Number.ToText(driverId) & "/safety/score",
+		startMs = DateTimeToTimeStamp(from),
+		endMs = DateTimeToTimeStamp(to),
+		jsonDocument = Json.Document(Web.Contents(baseUrl,[RelativePath = endpointUrl & "?startMs=" & Number.ToText(startMs) & "&endMs=" & Number.ToText(endMs), Headers = [Authorization = "Bearer " & accessToken]])),
+		#"Converted to Table" = Record.ToTable(jsonDocument),
+		#"Pivoted Column" = Table.Pivot(#"Converted to Table", List.Distinct(#"Converted to Table"[Name]), "Name", "Value"),
+		#"Added from" = Table.AddColumn(#"Pivoted Column","From", each from),
+		#"Added to" = Table.AddColumn(#"Added from","To", each to)
+// 		#"Added totalDistanceDrivenMiles" = Table.AddColumn(#"Pivoted Column", "totalDistanceDrivenMiles", each [totalDistanceDrivenMeters] * 0.0006213712, type number),
+	in
+		#"Added to"
+;
 
 /*
 Purpose:
